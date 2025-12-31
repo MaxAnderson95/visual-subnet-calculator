@@ -11,15 +11,41 @@ const getMaxDepth = (node: SubnetNode): number => {
   return 1 + Math.max(...node.children.map(getMaxDepth))
 }
 
+const STORAGE_KEY = 'subnet-tree-state'
+
 const SubnetTree = ({ cidr, resetKey }: { cidr: string; resetKey: number }) => {
   const [root, setRoot] = useState<SubnetNode | null>(() => {
     try {
+      // Try to restore from localStorage
+      const saved = localStorage.getItem(STORAGE_KEY)
+      if (saved) {
+        const parsed = JSON.parse(saved)
+        // Only restore if the saved CIDR matches
+        if (parsed && parsed.cidr === cidr) {
+          return parsed
+        }
+      }
       return toSubnetNode(cidr)
     } catch {
       return null
     }
   })
   const [selectedNode, setSelectedNode] = useState<SubnetNode | null>(null)
+
+  // Persist tree state to localStorage whenever it changes
+  useEffect(() => {
+    if (root) {
+      // Remove isExiting flags before saving
+      const cleanNode = (node: SubnetNode): SubnetNode => {
+        const { isExiting, ...rest } = node as SubnetNode & { isExiting?: boolean }
+        return {
+          ...rest,
+          children: node.children?.map(cleanNode)
+        }
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cleanNode(root)))
+    }
+  }, [root])
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -33,6 +59,15 @@ const SubnetTree = ({ cidr, resetKey }: { cidr: string; resetKey: number }) => {
 
   useEffect(() => {
     try {
+      // Check if we have a saved state for this CIDR
+      const saved = localStorage.getItem(STORAGE_KEY)
+      if (saved) {
+        const parsed = JSON.parse(saved)
+        if (parsed && parsed.cidr === cidr) {
+          setRoot(parsed)
+          return
+        }
+      }
       setRoot(toSubnetNode(cidr))
     } catch (err) {
       setRoot(null)
@@ -131,8 +166,13 @@ const SubnetTree = ({ cidr, resetKey }: { cidr: string; resetKey: number }) => {
     const hasChildren = node.children && node.children.length > 0
     const color = colors[level % colors.length]
     const isExiting = node.isExiting === true
-    // This node stacks its children vertically at level 3+
-    const shouldStackChildren = level >= 3
+    // After level 3, alternate between horizontal and vertical layouts
+    // Level 0-2: horizontal (default)
+    // Level 3: vertical (stacked)
+    // Level 4: horizontal
+    // Level 5: vertical (stacked)
+    // etc.
+    const shouldStackChildren = level >= 3 && (level - 3) % 2 === 0
     
     const maxDepthBelow = getMaxDepth(node)
     const myDeepest = level + maxDepthBelow

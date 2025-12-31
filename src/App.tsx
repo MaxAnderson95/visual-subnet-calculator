@@ -4,23 +4,24 @@ import SubnetTree from './SubnetTree'
 import { parseCidr } from './ip'
 
 const defaultCidr = '10.0.0.0/16'
+const STORAGE_KEY = 'subnet-cidr'
+
+const getInitialCidr = () => {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY)
+    if (saved) return saved
+  } catch {}
+  return defaultCidr
+}
 
 const App = () => {
-  const [cidrInput, setCidrInput] = useState(defaultCidr)
-  const [activeCidr, setActiveCidr] = useState(defaultCidr)
+  const [cidrInput, setCidrInput] = useState(getInitialCidr)
+  const [activeCidr, setActiveCidr] = useState(getInitialCidr)
   const [resetKey, setResetKey] = useState(0)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    const saved = localStorage.getItem('subnet-cidr')
-    if (saved) {
-      setCidrInput(saved)
-      setActiveCidr(saved)
-    }
-  }, [])
-
-  useEffect(() => {
-    localStorage.setItem('subnet-cidr', activeCidr)
+    localStorage.setItem(STORAGE_KEY, activeCidr)
   }, [activeCidr])
 
   const isValid = useMemo(() => {
