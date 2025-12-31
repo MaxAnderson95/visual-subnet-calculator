@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useRef } from 'react'
+import { useEffect, useMemo, useState, useRef, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import SubnetTree from './SubnetTree'
 import { parseCidr, toSubnetNode } from './ip'
@@ -33,21 +33,26 @@ async function decompress(b64: string): Promise<string> {
 }
 
 // Compact format: only store what can't be derived
-// Format: [cidr, label?, color?, [children...]]
-// Example: ["10.0.0.0/16", null, null, [["10.0.0.0/17", "Prod", "#ff0"], ["10.0.128.0/17"]]]
-type CompactNode = [string, string?, string?, CompactNode[]?]
+// Format: [cidr, label?, color?, notes?, [children...]]
+// Example: ["10.0.0.0/16", null, null, null, [["10.0.0.0/17", "Prod", "#ff0"], ["10.0.128.0/17"]]]
+type CompactNode = [string, string?, string?, string?, CompactNode[]?]
 
 function toCompact(node: SubnetNode): CompactNode {
   const result: CompactNode = [node.cidr]
   
   // Only add label if it exists
-  if (node.label || node.color || node.children?.length) {
+  if (node.label || node.color || node.notes || node.children?.length) {
     result.push(node.label || undefined)
   }
   
   // Only add color if it exists
-  if (node.color || node.children?.length) {
+  if (node.color || node.notes || node.children?.length) {
     result.push(node.color || undefined)
+  }
+  
+  // Only add notes if it exists
+  if (node.notes || node.children?.length) {
+    result.push(node.notes || undefined)
   }
   
   // Only add children if they exist
@@ -59,11 +64,12 @@ function toCompact(node: SubnetNode): CompactNode {
 }
 
 function fromCompact(compact: CompactNode): SubnetNode {
-  const [cidr, label, color, children] = compact
+  const [cidr, label, color, notes, children] = compact
   const node = toSubnetNode(cidr)
   
   if (label) node.label = label
   if (color) node.color = color
+  if (notes) node.notes = notes
   if (children?.length) {
     node.children = children.map(fromCompact)
   }
@@ -223,68 +229,84 @@ const App = () => {
     }
   }
 
-  // Load from URL on mount
-  useEffect(() => {
-    const loadFromUrl = async () => {
-      // Try hash-based compressed format first (new format)
-      const hash = window.location.hash.slice(1)
-      if (hash) {
-        try {
-          const decompressed = await decompress(hash)
-          const decoded = JSON.parse(decompressed)
-          
-          // Check if it's compact format (array) or old format (object)
-          if (Array.isArray(decoded)) {
-            // New compact format: [cidr, label?, color?, children?]
-            const tree = fromCompact(decoded as CompactNode)
-            setCidrInput(tree.cidr)
-            setActiveCidr(tree.cidr)
+  // Load from URL hash
+  const loadFromUrl = useCallback(async () => {
+    // Try hash-based compressed format first (new format)
+    const hash = window.location.hash.slice(1)
+    if (hash) {
+      setIsLoading(true)
+      try {
+        const decompressed = await decompress(hash)
+        const decoded = JSON.parse(decompressed)
+        
+        // Check if it's compact format (array) or old format (object)
+        if (Array.isArray(decoded)) {
+          // New compact format: [cidr, label?, color?, children?]
+          const tree = fromCompact(decoded as CompactNode)
+          setCidrInput(tree.cidr)
+          setActiveCidr(tree.cidr)
+          localStorage.setItem(TREE_STORAGE_KEY, JSON.stringify(tree))
+          // Force SubnetTree to remount and re-read from localStorage
+          setTreeKey(k => k + 1)
+        } else {
+          // Old format with c/t or cidr/tree keys
+          const cidr = decoded.c || decoded.cidr
+          const tree = decoded.t || decoded.tree
+          if (cidr && tree) {
+            setCidrInput(cidr)
+            setActiveCidr(cidr)
             localStorage.setItem(TREE_STORAGE_KEY, JSON.stringify(tree))
-            // Force SubnetTree to remount and re-read from localStorage
             setTreeKey(k => k + 1)
-          } else {
-            // Old format with c/t or cidr/tree keys
-            const cidr = decoded.c || decoded.cidr
-            const tree = decoded.t || decoded.tree
-            if (cidr && tree) {
-              setCidrInput(cidr)
-              setActiveCidr(cidr)
-              localStorage.setItem(TREE_STORAGE_KEY, JSON.stringify(tree))
-              setTreeKey(k => k + 1)
-            }
           }
-          // Clear the hash
-          window.history.replaceState({}, '', window.location.pathname)
-        } catch (err) {
-          console.error('Failed to load from hash:', err)
-        } finally {
-          setIsLoading(false)
         }
-        return
+        // Clear the hash
+        window.history.replaceState({}, '', window.location.pathname)
+      } catch (err) {
+        console.error('Failed to load from hash:', err)
+      } finally {
+        setIsLoading(false)
       }
-      
-      // Fallback to old query param formats for backwards compatibility
-      const params = new URLSearchParams(window.location.search)
-      const data = params.get('data')
-      if (data) {
-        try {
-          const decoded = JSON.parse(atob(data))
-          if (decoded.cidr && decoded.tree) {
-            setCidrInput(decoded.cidr)
-            setActiveCidr(decoded.cidr)
-            localStorage.setItem(TREE_STORAGE_KEY, JSON.stringify(decoded.tree))
-            setTreeKey(k => k + 1)
-            window.history.replaceState({}, '', window.location.pathname)
-          }
-        } catch (err) {
-          console.error('Failed to load from URL:', err)
-        }
-      }
-      setIsLoading(false)
+      return true
     }
     
-    loadFromUrl()
+    // Fallback to old query param formats for backwards compatibility
+    const params = new URLSearchParams(window.location.search)
+    const data = params.get('data')
+    if (data) {
+      setIsLoading(true)
+      try {
+        const decoded = JSON.parse(atob(data))
+        if (decoded.cidr && decoded.tree) {
+          setCidrInput(decoded.cidr)
+          setActiveCidr(decoded.cidr)
+          localStorage.setItem(TREE_STORAGE_KEY, JSON.stringify(decoded.tree))
+          setTreeKey(k => k + 1)
+          window.history.replaceState({}, '', window.location.pathname)
+        }
+      } catch (err) {
+        console.error('Failed to load from URL:', err)
+      } finally {
+        setIsLoading(false)
+      }
+      return true
+    }
+    
+    setIsLoading(false)
+    return false
   }, [])
+
+  // Load from URL on mount and listen for hash changes
+  useEffect(() => {
+    loadFromUrl()
+    
+    // Listen for hash changes (e.g., when user pastes a share URL)
+    const handleHashChange = () => {
+      loadFromUrl()
+    }
+    
+    window.addEventListener('hashchange', handleHashChange)
+    return () => window.removeEventListener('hashchange', handleHashChange)
+  }, [loadFromUrl])
 
   return (
     <div className="app-shell">
@@ -394,7 +416,7 @@ const App = () => {
       </div>
 
       <footer className="footer">
-        <p>Click on any subnet to view details. Use keyboard shortcuts: <kbd>S</kbd> Split, <kbd>C</kbd> Combine, <kbd>L</kbd> Label, <kbd>Esc</kbd> Close</p>
+        <p>Click on any subnet to view details. Keyboard: <kbd>S</kbd> Split <kbd>C</kbd> Combine <kbd>L</kbd> Label <kbd>N</kbd> Notes <kbd>Ctrl+Z</kbd> Undo <kbd>Ctrl+Y</kbd> Redo <kbd>Ctrl+F</kbd> Search</p>
       </footer>
 
       <AnimatePresence>

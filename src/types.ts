@@ -9,6 +9,8 @@ export type SubnetNode = {
   isExiting?: boolean
   label?: string
   color?: string
+  notes?: string
+  collapsed?: boolean
 }
 
 export const PRESET_COLORS = [
