@@ -91,3 +91,23 @@ export const getRange = (start: number, end: number) => {
 export const getHostBits = (prefix: number) => {
   return 32 - prefix
 }
+
+export const getSubnetMask = (prefix: number): string => {
+  if (prefix === 0) return '0.0.0.0'
+  const mask = (~((1 << (32 - prefix)) - 1)) >>> 0
+  return [mask >>> 24, (mask >>> 16) & 255, (mask >>> 8) & 255, mask & 255].join('.')
+}
+
+export const getUsableHosts = (size: number): number => {
+  // For /31 and /32, special case - no usable hosts in traditional sense
+  if (size <= 2) return size === 2 ? 2 : 1 // /31 is point-to-point, /32 is single host
+  return size - 2 // subtract network and broadcast addresses
+}
+
+export const getNetworkAddress = (start: number): string => {
+  return [start >>> 24, (start >>> 16) & 255, (start >>> 8) & 255, start & 255].join('.')
+}
+
+export const getBroadcastAddress = (end: number): string => {
+  return [end >>> 24, (end >>> 16) & 255, (end >>> 8) & 255, end & 255].join('.')
+}

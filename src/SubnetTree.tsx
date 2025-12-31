@@ -1,7 +1,8 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { useEffect, useState, useCallback } from 'react'
-import { canCombine, combinePair, makeChildren, getRange, toSubnetNode } from './ip'
+import { useEffect, useState, useCallback, useRef } from 'react'
+import { canCombine, combinePair, makeChildren, getRange, toSubnetNode, getSubnetMask, getUsableHosts, getNetworkAddress, getBroadcastAddress } from './ip'
 import type { SubnetNode } from './types'
+import { PRESET_COLORS } from './types'
 
 const colors = ['#6cf1d6', '#7ea6ff', '#c38bff', '#ff9ec7']
 
@@ -12,6 +13,35 @@ const getMaxDepth = (node: SubnetNode): number => {
 }
 
 const STORAGE_KEY = 'subnet-tree-state'
+
+// Copy to clipboard helper
+const copyToClipboard = async (text: string): Promise<boolean> => {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// Toast notification component
+const Toast = ({ message, onClose }: { message: string; onClose: () => void }) => {
+  useEffect(() => {
+    const timer = setTimeout(onClose, 2000)
+    return () => clearTimeout(timer)
+  }, [onClose])
+
+  return (
+    <motion.div
+      className="toast"
+      initial={{ opacity: 0, y: -20 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -20 }}
+    >
+      {message}
+    </motion.div>
+  )
+}
 
 const SubnetTree = ({ cidr, resetKey }: { cidr: string; resetKey: number }) => {
   const [root, setRoot] = useState<SubnetNode | null>(() => {
@@ -31,6 +61,11 @@ const SubnetTree = ({ cidr, resetKey }: { cidr: string; resetKey: number }) => {
     }
   })
   const [selectedNode, setSelectedNode] = useState<SubnetNode | null>(null)
+  const [editingLabel, setEditingLabel] = useState<string | null>(null)
+  const [labelInput, setLabelInput] = useState('')
+  const [toastMessage, setToastMessage] = useState<string | null>(null)
+  const [showColorPicker, setShowColorPicker] = useState<string | null>(null)
+  const labelInputRef = useRef<HTMLInputElement>(null)
 
   // Persist tree state to localStorage whenever it changes
   useEffect(() => {
@@ -47,15 +82,41 @@ const SubnetTree = ({ cidr, resetKey }: { cidr: string; resetKey: number }) => {
     }
   }, [root])
 
+  // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setSelectedNode(null)
+        setEditingLabel(null)
+        setShowColorPicker(null)
+      }
+      // 's' to split selected node
+      if (e.key === 's' && selectedNode && !editingLabel && selectedNode.prefix < 31) {
+        e.preventDefault()
+        split(selectedNode.id)
+      }
+      // 'c' to combine selected node
+      if (e.key === 'c' && selectedNode && !editingLabel && selectedNode.children && selectedNode.children.length > 0) {
+        e.preventDefault()
+        combine(selectedNode.id)
+      }
+      // 'l' to edit label
+      if (e.key === 'l' && selectedNode && !editingLabel) {
+        e.preventDefault()
+        setEditingLabel(selectedNode.id)
+        setLabelInput(selectedNode.label || '')
       }
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [])
+  }, [selectedNode, editingLabel])
+
+  // Focus label input when editing
+  useEffect(() => {
+    if (editingLabel && labelInputRef.current) {
+      labelInputRef.current.focus()
+    }
+  }, [editingLabel])
 
   useEffect(() => {
     try {
@@ -162,16 +223,62 @@ const SubnetTree = ({ cidr, resetKey }: { cidr: string; resetKey: number }) => {
     [root],
   )
 
+  const updateNodeLabel = useCallback(
+    (nodeId: string, label: string) => {
+      if (!root) return
+      const clone = structuredClone(root) as SubnetNode
+      const stack = [clone]
+      while (stack.length) {
+        const current = stack.pop()!
+        if (current.id === nodeId) {
+          current.label = label || undefined
+          break
+        }
+        current.children?.forEach((c) => stack.push(c))
+      }
+      setRoot(clone)
+      // Update selectedNode if it's the one being updated
+      if (selectedNode?.id === nodeId) {
+        setSelectedNode({ ...selectedNode, label: label || undefined })
+      }
+    },
+    [root, selectedNode],
+  )
+
+  const updateNodeColor = useCallback(
+    (nodeId: string, color: string | undefined) => {
+      if (!root) return
+      const clone = structuredClone(root) as SubnetNode
+      const stack = [clone]
+      while (stack.length) {
+        const current = stack.pop()!
+        if (current.id === nodeId) {
+          current.color = color
+          break
+        }
+        current.children?.forEach((c) => stack.push(c))
+      }
+      setRoot(clone)
+      // Update selectedNode if it's the one being updated
+      if (selectedNode?.id === nodeId) {
+        setSelectedNode({ ...selectedNode, color })
+      }
+    },
+    [root, selectedNode],
+  )
+
+  const handleCopy = async (text: string, label: string) => {
+    const success = await copyToClipboard(text)
+    setToastMessage(success ? `Copied ${label}!` : 'Failed to copy')
+  }
+
   const renderNode = (node: SubnetNode, level: number, index: number = 0, siblingMaxDepth: number = 0, parentIsStacked: boolean = false) => {
     const hasChildren = node.children && node.children.length > 0
-    const color = colors[level % colors.length]
+    const defaultColor = colors[level % colors.length]
+    const nodeColor = node.color || defaultColor
     const isExiting = node.isExiting === true
+    const isSelected = selectedNode?.id === node.id
     // After level 3, alternate between horizontal and vertical layouts
-    // Level 0-2: horizontal (default)
-    // Level 3: vertical (stacked)
-    // Level 4: horizontal
-    // Level 5: vertical (stacked)
-    // etc.
     const shouldStackChildren = level >= 3 && (level - 3) % 2 === 0
     
     const maxDepthBelow = getMaxDepth(node)
@@ -181,34 +288,24 @@ const SubnetTree = ({ cidr, resetKey }: { cidr: string; resetKey: number }) => {
     const childDepths = node.children?.map(c => level + 1 + getMaxDepth(c)) || []
     const maxChildDepth = Math.max(0, ...childDepths)
     
-    // After split 4+ (4 or more levels from root), progressively adjust from 50/50
-    // Progressive ratio: 50/50 -> 60/40 -> 70/30 as depth difference increases
-    let flexGrow = 5 // Base flex represents 50%
+    // Progressive ratio adjustment for deep nesting
+    let flexGrow = 5
     
-    // When any sibling reaches deep nesting (4+ levels from root), adjust sizing progressively
     if (level > 0 && siblingMaxDepth >= 4) {
-      // How many levels beyond the threshold (4) does the deepest sibling go?
       const depthBeyondThreshold = siblingMaxDepth - 4
-      // Compare this node's depth to its sibling's max depth
       const depthDifference = myDeepest - siblingMaxDepth
       
       if (depthDifference < 0) {
-        // This node is shallower - reduce its flex progressively
-        // Start at 4 (representing 40%), decrease by 1 for each additional level (minimum 2)
         flexGrow = Math.max(2, 4 - depthBeyondThreshold)
       } else if (depthDifference === 0) {
-        // This is the deepest node - increase its flex progressively  
-        // Start at 6 (representing 60%), increase by 1 for each additional level (maximum 8)
         flexGrow = Math.min(8, 6 + depthBeyondThreshold)
       }
     }
     
     const classes = ['box']
     if (shouldStackChildren) classes.push('box-stacked')
+    if (isSelected) classes.push('box-selected')
     
-    // Determine flex based on whether parent is stacked (column) or horizontal (row)
-    // In stacked parent: use auto sizing
-    // In horizontal parent: use flex grow for proportional sizing
     const flexStyle = parentIsStacked ? '0 0 auto' : `${flexGrow} 1 0`
     
     return (
@@ -219,10 +316,11 @@ const SubnetTree = ({ cidr, resetKey }: { cidr: string; resetKey: number }) => {
         animate={isExiting ? { opacity: 0 } : { opacity: 1 }}
         transition={{ duration: 0.25, ease: 'easeInOut' }}
         style={{ 
-          borderLeftColor: level > 0 ? color : 'transparent',
+          borderLeftColor: level > 0 ? nodeColor : 'transparent',
           borderLeftWidth: level > 0 ? '3px' : '0',
           borderLeftStyle: 'solid',
           flex: flexStyle,
+          boxShadow: isSelected ? `0 0 0 2px ${nodeColor}, 0 10px 30px rgba(0, 0, 0, 0.25)` : undefined,
         }}
         onClick={(e) => {
           e.stopPropagation()
@@ -230,15 +328,18 @@ const SubnetTree = ({ cidr, resetKey }: { cidr: string; resetKey: number }) => {
         }}
       >
         <div className="box-header">
-          <div className="box-title">{node.cidr}</div>
+          <div className="box-title-row">
+            <div className="box-title">{node.cidr}</div>
+            {node.label && <div className="box-label" style={{ color: nodeColor }}>{node.label}</div>}
+          </div>
           <div className="button-row" style={{ marginTop: 4 }}>
             {!hasChildren && node.prefix < 31 && (
-              <button className="btn-secondary" onClick={(e) => { e.stopPropagation(); split(node.id) }}>
+              <button className="btn-secondary" onClick={(e) => { e.stopPropagation(); split(node.id) }} title="Split (S)">
                 Split
               </button>
             )}
             {hasChildren && !isExiting && (
-              <button className="btn-danger" onClick={(e) => { e.stopPropagation(); combine(node.id) }}>
+              <button className="btn-danger" onClick={(e) => { e.stopPropagation(); combine(node.id) }} title="Combine (C)">
                 Combine
               </button>
             )}
@@ -262,6 +363,15 @@ const SubnetTree = ({ cidr, resetKey }: { cidr: string; resetKey: number }) => {
       <AnimatePresence mode="popLayout">
         <div style={{ width: '100%' }}>{renderNode(root, 0)}</div>
       </AnimatePresence>
+      
+      {/* Toast notifications */}
+      <AnimatePresence>
+        {toastMessage && (
+          <Toast message={toastMessage} onClose={() => setToastMessage(null)} />
+        )}
+      </AnimatePresence>
+
+      {/* Subnet details modal */}
       <AnimatePresence>
         {selectedNode && (
           <motion.div
@@ -269,7 +379,11 @@ const SubnetTree = ({ cidr, resetKey }: { cidr: string; resetKey: number }) => {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            onClick={() => setSelectedNode(null)}
+            onClick={() => {
+              setSelectedNode(null)
+              setEditingLabel(null)
+              setShowColorPicker(null)
+            }}
           >
             <motion.div
               className="modal"
@@ -279,28 +393,121 @@ const SubnetTree = ({ cidr, resetKey }: { cidr: string; resetKey: number }) => {
               onClick={(e) => e.stopPropagation()}
             >
               <div className="modal-header">
-                <h2>{selectedNode.cidr}</h2>
-                <button className="modal-close" onClick={() => setSelectedNode(null)}>
+                <div className="modal-title-section">
+                  <h2>{selectedNode.cidr}</h2>
+                  {editingLabel === selectedNode.id ? (
+                    <form
+                      className="label-edit-form"
+                      onSubmit={(e) => {
+                        e.preventDefault()
+                        updateNodeLabel(selectedNode.id, labelInput)
+                        setEditingLabel(null)
+                      }}
+                    >
+                      <input
+                        ref={labelInputRef}
+                        type="text"
+                        className="label-input"
+                        value={labelInput}
+                        onChange={(e) => setLabelInput(e.target.value)}
+                        placeholder="Enter label..."
+                        onBlur={() => {
+                          updateNodeLabel(selectedNode.id, labelInput)
+                          setEditingLabel(null)
+                        }}
+                      />
+                    </form>
+                  ) : (
+                    <button
+                      className="btn-label"
+                      onClick={() => {
+                        setEditingLabel(selectedNode.id)
+                        setLabelInput(selectedNode.label || '')
+                      }}
+                      style={{ color: selectedNode.color || '#6cf1d6' }}
+                    >
+                      {selectedNode.label || '+ Add label'}
+                    </button>
+                  )}
+                </div>
+                <button className="modal-close" onClick={() => {
+                  setSelectedNode(null)
+                  setEditingLabel(null)
+                  setShowColorPicker(null)
+                }}>
                   &times;
                 </button>
               </div>
+              
+              {/* Color picker */}
+              <div className="color-picker-section">
+                <span className="modal-label">Color</span>
+                <div className="color-picker-row">
+                  {PRESET_COLORS.map((color) => (
+                    <button
+                      key={color}
+                      className={`color-swatch ${selectedNode.color === color ? 'color-swatch-selected' : ''}`}
+                      style={{ backgroundColor: color }}
+                      onClick={() => updateNodeColor(selectedNode.id, color)}
+                      title={color}
+                    />
+                  ))}
+                  <button
+                    className={`color-swatch color-swatch-none ${!selectedNode.color ? 'color-swatch-selected' : ''}`}
+                    onClick={() => updateNodeColor(selectedNode.id, undefined)}
+                    title="Default"
+                  >
+                    <span>&times;</span>
+                  </button>
+                </div>
+              </div>
+
               <div className="modal-body">
+                <div className="modal-row clickable" onClick={() => handleCopy(selectedNode.cidr, 'CIDR')}>
+                  <span className="modal-label">CIDR</span>
+                  <span className="modal-value">{selectedNode.cidr} <span className="copy-hint">click to copy</span></span>
+                </div>
+                <div className="modal-row clickable" onClick={() => handleCopy(getSubnetMask(selectedNode.prefix), 'subnet mask')}>
+                  <span className="modal-label">Subnet Mask</span>
+                  <span className="modal-value">{getSubnetMask(selectedNode.prefix)} <span className="copy-hint">click to copy</span></span>
+                </div>
                 <div className="modal-row">
-                  <span className="modal-label">Hosts</span>
+                  <span className="modal-label">Total Addresses</span>
                   <span className="modal-value">{selectedNode.size.toLocaleString()}</span>
                 </div>
                 <div className="modal-row">
-                  <span className="modal-label">First IP</span>
-                  <span className="modal-value">{getRange(selectedNode.start, selectedNode.end).first}</span>
+                  <span className="modal-label">Usable Hosts</span>
+                  <span className="modal-value">{getUsableHosts(selectedNode.size).toLocaleString()}</span>
                 </div>
-                <div className="modal-row">
-                  <span className="modal-label">Last IP</span>
-                  <span className="modal-value">{getRange(selectedNode.start, selectedNode.end).last}</span>
+                <div className="modal-row clickable" onClick={() => handleCopy(getRange(selectedNode.start, selectedNode.end).first, 'first IP')}>
+                  <span className="modal-label">Network Address</span>
+                  <span className="modal-value">{getRange(selectedNode.start, selectedNode.end).first} <span className="copy-hint">click to copy</span></span>
                 </div>
-                <div className="modal-row">
-                  <span className="modal-label">Netmask</span>
-                  <span className="modal-value">/{selectedNode.prefix}</span>
+                <div className="modal-row clickable" onClick={() => handleCopy(getRange(selectedNode.start, selectedNode.end).last, 'last IP')}>
+                  <span className="modal-label">Broadcast Address</span>
+                  <span className="modal-value">{getRange(selectedNode.start, selectedNode.end).last} <span className="copy-hint">click to copy</span></span>
                 </div>
+                <div className="modal-row clickable" onClick={() => handleCopy(`${getRange(selectedNode.start, selectedNode.end).first} - ${getRange(selectedNode.start, selectedNode.end).last}`, 'IP range')}>
+                  <span className="modal-label">IP Range</span>
+                  <span className="modal-value">{getRange(selectedNode.start, selectedNode.end).first} - {getRange(selectedNode.start, selectedNode.end).last} <span className="copy-hint">click to copy</span></span>
+                </div>
+              </div>
+
+              <div className="modal-actions">
+                {!selectedNode.children && selectedNode.prefix < 31 && (
+                  <button className="btn-primary" onClick={() => { split(selectedNode.id); setSelectedNode(null) }}>
+                    Split Subnet
+                  </button>
+                )}
+                {selectedNode.children && selectedNode.children.length > 0 && (
+                  <button className="btn-danger" onClick={() => { combine(selectedNode.id); setSelectedNode(null) }}>
+                    Combine Children
+                  </button>
+                )}
+              </div>
+
+              <div className="modal-shortcuts">
+                <span className="shortcut-hint">Keyboard: <kbd>S</kbd> Split <kbd>C</kbd> Combine <kbd>L</kbd> Label <kbd>Esc</kbd> Close</span>
               </div>
             </motion.div>
           </motion.div>
