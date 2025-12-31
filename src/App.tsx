@@ -87,9 +87,11 @@ const App = () => {
   const [cidrInput, setCidrInput] = useState(getInitialCidr)
   const [activeCidr, setActiveCidr] = useState(getInitialCidr)
   const [resetKey, setResetKey] = useState(0)
+  const [treeKey, setTreeKey] = useState(0)
   const [error, setError] = useState('')
   const [showExportMenu, setShowExportMenu] = useState(false)
   const [toastMessage, setToastMessage] = useState<string | null>(null)
+  const [isLoading, setIsLoading] = useState(() => !!window.location.hash.slice(1))
   const fileInputRef = useRef<HTMLInputElement>(null)
   const exportMenuRef = useRef<HTMLDivElement>(null)
 
@@ -236,20 +238,27 @@ const App = () => {
             // New compact format: [cidr, label?, color?, children?]
             const tree = fromCompact(decoded as CompactNode)
             setCidrInput(tree.cidr)
+            setActiveCidr(tree.cidr)
             localStorage.setItem(TREE_STORAGE_KEY, JSON.stringify(tree))
+            // Force SubnetTree to remount and re-read from localStorage
+            setTreeKey(k => k + 1)
           } else {
             // Old format with c/t or cidr/tree keys
             const cidr = decoded.c || decoded.cidr
             const tree = decoded.t || decoded.tree
             if (cidr && tree) {
               setCidrInput(cidr)
+              setActiveCidr(cidr)
               localStorage.setItem(TREE_STORAGE_KEY, JSON.stringify(tree))
+              setTreeKey(k => k + 1)
             }
           }
           // Clear the hash
           window.history.replaceState({}, '', window.location.pathname)
         } catch (err) {
           console.error('Failed to load from hash:', err)
+        } finally {
+          setIsLoading(false)
         }
         return
       }
@@ -262,13 +271,16 @@ const App = () => {
           const decoded = JSON.parse(atob(data))
           if (decoded.cidr && decoded.tree) {
             setCidrInput(decoded.cidr)
+            setActiveCidr(decoded.cidr)
             localStorage.setItem(TREE_STORAGE_KEY, JSON.stringify(decoded.tree))
+            setTreeKey(k => k + 1)
             window.history.replaceState({}, '', window.location.pathname)
           }
         } catch (err) {
           console.error('Failed to load from URL:', err)
         }
       }
+      setIsLoading(false)
     }
     
     loadFromUrl()
@@ -370,8 +382,10 @@ const App = () => {
       </div>
 
       <div className="canvas-shell">
-        {isValid ? (
-          <SubnetTree cidr={activeCidr} resetKey={resetKey} />
+        {isLoading ? (
+          <div className="helper-text">Loading...</div>
+        ) : isValid ? (
+          <SubnetTree key={treeKey} cidr={activeCidr} resetKey={resetKey} />
         ) : (
           <div className="helper-text" style={{ color: '#ff9e9e' }}>
             Please enter a valid IPv4 CIDR (example: 10.0.0.0/16).
